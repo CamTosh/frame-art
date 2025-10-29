@@ -1,0 +1,8 @@
+tvart-main/
+*.pyc
+__pycache__/
+.git/
+.gitignore
+.env
+venv/
+tv-token.txt

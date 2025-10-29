@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Samsung Frame TV Art Manager</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .section { margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; }
+        .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
+        .image-item { border: 1px solid #ccc; padding: 10px; text-align: center; }
+        .image-item img { max-width: 100%; height: 150px; object-fit: cover; }
+        .upload-area { border: 2px dashed #ccc; padding: 20px; text-align: center; margin-bottom: 20px; }
+        input[type="file"] { margin: 10px 0; }
+        button { padding: 10px 15px; margin: 5px; background: #007cba; color: white; border: none; cursor: pointer; }
+        button:hover { background: #005a8a; }
+        .config-form { background: #f5f5f5; padding: 15px; margin-bottom: 20px; }
+        .flash-messages { margin-bottom: 20px; }
+        .flash { padding: 10px; margin: 5px 0; border-radius: 3px; }
+        .flash.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .flash.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .send-btn { background: #28a745; }
+        .send-btn:hover { background: #218838; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Samsung Frame TV Art Manager</h1>
+        
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="flash-messages">
+                    {% for message in messages %}
+                        <div class="flash success">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        
+        <!-- TV Configuration -->
+        <div class="section">
+            <h2>TV Configuration</h2>
+            <form method="POST" action="/config" class="config-form">
+                <label for="tv_ip">Samsung TV IP Address:</label>
+                <input type="text" name="tv_ip" id="tv_ip" value="{{ tv_ip }}" placeholder="192.168.1.106" required>
+                <button type="submit">Update IP</button>
+                <button type="button" onclick="pairTV()">Test Connection</button>
+                <button type="button" onclick="forcePair()" style="background: #ffc107; color: black;">Force Pair TV</button>
+            </form>
+            <div id="pair-status"></div>
+        </div>
+        
+        <!-- Upload Section -->
+        <div class="section">
+            <h2>Upload Images</h2>
+            <form method="POST" action="/upload" enctype="multipart/form-data">
+                <div class="upload-area">
+                    <p>Select images to upload (PNG, JPG, JPEG)</p>
+                    <input type="file" name="files[]" multiple accept=".png,.jpg,.jpeg" required>
+                    <br>
+                    <button type="submit">Upload Images</button>
+                </div>
+            </form>
+        </div>
+        
+        <!-- Image Gallery -->
+        <div class="section">
+            <h2>Image Gallery ({{ images|length }} images)</h2>
+            {% if images %}
+                <div class="gallery">
+                    {% for image in images %}
+                        <div class="image-item">
+                            <img src="/image/{{ image.filename }}" alt="{{ image.filename }}">
+                            <h4>{{ image.filename }}</h4>
+                            <p>Size: {{ "%.1f"|format(image.size / 1024) }} KB</p>
+                            <a href="/send-to-tv/{{ image.filename }}">
+                                <button class="send-btn">Send to TV</button>
+                            </a>
+                        </div>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <p>No images found. Upload some images to get started!</p>
+            {% endif %}
+        </div>
+        
+        <!-- TV Status -->
+        <div class="section">
+            <h2>TV Status</h2>
+            <button onclick="checkTVStatus()">Check TV Status</button>
+            <div id="tv-status"></div>
+        </div>
+    </div>
+    
+    <script>
+        function pairTV() {
+            const statusDiv = document.getElementById('pair-status');
+            statusDiv.innerHTML = '<p>Testing connection and initiating pairing...</p>';
+            
+            fetch('/pair-tv')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        statusDiv.innerHTML = `
+                            <div style="color: green; padding: 10px; background: #d4edda; border: 1px solid #c3e6cb; margin-top: 10px;">
+                                <strong>✓ ${data.message}</strong><br>
+                                <small>Available art count: ${data.art_count}</small><br>
+                                <small>Token created: ${data.token_created ? 'Yes' : 'No'}</small>
+                            </div>
+                        `;
+                    } else {
+                        let instructions = '';
+                        if (data.instructions) {
+                            instructions = '<br><br><strong>Instructions:</strong><br>' + data.instructions.join('<br>');
+                        }
+                        
+                        statusDiv.innerHTML = `
+                            <div style="color: #721c24; padding: 10px; background: #f8d7da; border: 1px solid #f5c6cb; margin-top: 10px;">
+                                <strong>✗ ${data.error}</strong><br>
+                                <small>Token file exists: ${data.token_exists ? 'Yes' : 'No'}</small>
+                                ${instructions}
+                                <br><br>
+                                <strong>⚠️ IMPORTANT:</strong> Watch your TV screen for a popup asking to allow the connection!
+                            </div>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    statusDiv.innerHTML = `
+                        <div style="color: #721c24; padding: 10px; background: #f8d7da; border: 1px solid #f5c6cb; margin-top: 10px;">
+                            <strong>✗ Connection Error</strong><br>
+                            <small>${error}</small>
+                        </div>
+                    `;
+                });
+        }
+        
+        function forcePair() {
+            const statusDiv = document.getElementById('pair-status');
+            statusDiv.innerHTML = '<p><strong>🔄 FORCING TV PAIRING...</strong><br>WATCH YOUR TV SCREEN FOR A POPUP!</p>';
+            
+            fetch('/force-pair')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        statusDiv.innerHTML = `
+                            <div style="color: green; padding: 10px; background: #d4edda; border: 1px solid #c3e6cb; margin-top: 10px;">
+                                <strong>✅ TV PAIRING SUCCESSFUL!</strong><br>
+                                Device: ${data.device_name}<br>
+                                Token created: ${data.token_created ? 'Yes' : 'No'}<br>
+                                <small>You can now upload images to the TV!</small>
+                            </div>
+                        `;
+                    } else {
+                        let instructions = '';
+                        if (data.instructions) {
+                            instructions = '<br><br><strong>📺 PAIRING INSTRUCTIONS:</strong><br>' + data.instructions.join('<br>');
+                        }
+                        
+                        statusDiv.innerHTML = `
+                            <div style="color: #856404; padding: 10px; background: #fff3cd; border: 1px solid #ffeaa7; margin-top: 10px;">
+                                <strong>⚠️ PAIRING IN PROGRESS</strong><br>
+                                <small>Error: ${data.error}</small><br>
+                                <small>Token exists: ${data.token_exists ? 'Yes' : 'No'}</small>
+                                ${instructions}
+                                <br><br>
+                                <strong>🎯 LOOK AT YOUR TV NOW!</strong><br>
+                                <strong>Accept the connection popup on your Samsung TV!</strong>
+                            </div>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    statusDiv.innerHTML = `
+                        <div style="color: #721c24; padding: 10px; background: #f8d7da; border: 1px solid #f5c6cb; margin-top: 10px;">
+                            <strong>❌ Pairing Failed</strong><br>
+                            <small>${error}</small>
+                        </div>
+                    `;
+                });
+        }
+        
+        function checkTVStatus() {
+            fetch('/tv-art')
+                .then(response => response.json())
+                .then(data => {
+                    const statusDiv = document.getElementById('tv-status');
+                    if (data.error) {
+                        statusDiv.innerHTML = `<p style="color: red;">Error: ${data.error}</p>`;
+                    } else {
+                        statusDiv.innerHTML = `
+                            <p>Available art on TV: ${data.available_count}</p>
+                            <p>Current art ID: ${data.current.content_id || 'Unknown'}</p>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('tv-status').innerHTML = `<p style="color: red;">Error: ${error}</p>`;
+                });
+        }
+    </script>
+</body>
+</html>
