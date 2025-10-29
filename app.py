@@ -17,7 +17,6 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32MB max file size
 # Configuration
 IMAGES_DIR = Path('./images')
 CONFIG_FILE = Path('./config.json')
-TOKEN_FILE = Path('./tv-token.txt')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 
 # Ensure images directory exists
@@ -25,18 +24,11 @@ IMAGES_DIR.mkdir(exist_ok=True)
 
 def load_config():
     """Load configuration from file"""
-    default_config = {'tv_ip': '192.168.1.106', 'tv_token': None}
+    default_config = {'tv_ip': '192.168.1.22', 'tv_token': None}
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, 'r') as f:
-                config = json.load(f)
-                # Migrate token from file if it exists
-                if TOKEN_FILE.exists() and not config.get('tv_token'):
-                    with open(TOKEN_FILE, 'r') as tf:
-                        config['tv_token'] = tf.read().strip()
-                    save_config(config)
-                    logger.info(f"Migrated token to config: {config['tv_token']}")
-                return config
+                return json.load(f)
         except Exception as e:
             logger.error(f"Error loading config: {e}")
     return default_config
@@ -54,32 +46,35 @@ def save_config(config):
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def is_tv_paired():
+    """Check if TV is already paired (has token)"""
+    config = load_config()
+    return config.get('tv_token') is not None
+
 def get_tv_connection():
-    """Get Samsung TV connection with token authentication"""
+    """Get Samsung TV connection with token"""
     config = load_config()
     try:
-        # Use token from config if available
         if config.get('tv_token'):
-            tv = SamsungTVWS(
+            return SamsungTVWS(
                 host=config['tv_ip'],
                 port=8002,
                 token=config['tv_token']
             )
         else:
-            tv = SamsungTVWS(
+            return SamsungTVWS(
                 host=config['tv_ip'],
-                port=8002,
-                token_file=str(TOKEN_FILE)
+                port=8002
             )
-        return tv
     except Exception as e:
-        logger.error(f"Error connecting to TV at {config['tv_ip']}: {e}")
+        logger.error(f"Error connecting to TV: {e}")
         return None
 
 @app.route('/')
 def index():
     """Main page with image gallery and upload form"""
     config = load_config()
+    paired = is_tv_paired()
 
     # Get local images
     images = []
@@ -94,7 +89,8 @@ def index():
 
     return render_template('index.html',
                          images=images,
-                         tv_ip=config['tv_ip'])
+                         tv_ip=config['tv_ip'],
+                         tv_paired=paired)
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
@@ -125,74 +121,45 @@ def serve_image(filename):
 @app.route('/send-to-tv/<filename>')
 def send_to_tv(filename):
     """Send image to Samsung TV"""
+    if not is_tv_paired():
+        flash('❌ TV not paired. Please pair your TV first.')
+        return redirect(url_for('index'))
+
     config = load_config()
-    
     image_path = IMAGES_DIR / filename
+
     if not image_path.exists():
         flash(f'Image not found: {filename}')
         return redirect(url_for('index'))
 
     try:
-        logger.info(f"Attempting to send {filename} to TV at {config['tv_ip']}")
-        
+        logger.info(f"Sending {filename} to TV at {config['tv_ip']}")
+
         with open(image_path, 'rb') as f:
             image_data = f.read()
 
-        # Determine file type
         file_ext = filename.rsplit('.', 1)[1].lower()
         file_type = 'png' if file_ext == 'png' else 'jpg'
-        
+
         logger.info(f"Image size: {len(image_data)} bytes, type: {file_type}")
 
-        # Use the get_tv_connection function which handles token properly
-        tv = get_tv_connection()
-        if not tv:
-            flash('Cannot connect to TV. Check configuration.')
-            return redirect(url_for('index'))
+        # Create TV connection with token
+        tv = SamsungTVWS(
+            host=config['tv_ip'],
+            port=8002,
+            token=config['tv_token']
+        )
 
-        # Get art API and upload
+        # Upload to TV
         art_api = tv.art()
-        logger.info("Art API connection established")
-        
-        # Upload to TV with proper error handling
         result = art_api.upload(image_data, file_type=file_type)
-        logger.info(f"Upload result: {result}")
-        
-        flash(f'✅ Successfully sent {filename} to TV')
+
+        flash(f'✅ Successfully sent {filename} to Samsung Frame TV')
         logger.info(f"Successfully sent {filename} to TV")
 
     except Exception as e:
-        error_msg = str(e)
         logger.error(f"Error sending {filename} to TV: {e}")
-        
-        # Try alternative approach - direct connection with token
-        try:
-            logger.info("Trying direct token connection...")
-            if config.get('tv_token'):
-                tv_direct = SamsungTVWS(
-                    host=config['tv_ip'],
-                    port=8002,
-                    token=config['tv_token']
-                )
-                art_api = tv_direct.art()
-                result = art_api.upload(image_data, file_type=file_type)
-                flash(f'✅ Successfully sent {filename} to TV (direct token)')
-                logger.info(f"Successfully sent {filename} to TV with direct token")
-            else:
-                raise Exception("No token available")
-                
-        except Exception as e2:
-            logger.error(f"All upload methods failed: {e2}")
-            
-            # Specific error messages
-            if "Connection refused" in str(e2):
-                flash('❌ Connection refused - TV may not be in Art Mode or network issue')
-            elif "timeout" in str(e2).lower():
-                flash('❌ Connection timeout - check TV IP and network')
-            elif "Unauthorized" in str(e2):
-                flash('❌ Unauthorized - try Force Pair TV again')
-            else:
-                flash(f'❌ Upload failed: {str(e2)}')
+        flash(f'❌ Failed to send {filename}: {str(e)}')
 
     return redirect(url_for('index'))
 
@@ -212,243 +179,56 @@ def update_config():
 
     return redirect(url_for('index'))
 
-@app.route('/tv-art')
-def tv_art():
-    """Get current TV art info"""
-    tv = get_tv_connection()
-    if not tv:
-        return jsonify({'error': 'Cannot connect to TV'})
-
-    try:
-        art = tv.art()
-        available = art.available()
-        current = art.get_current()
-
-        return jsonify({
-            'available_count': len(available),
-            'current': current
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)})
-
 @app.route('/pair-tv')
 def pair_tv():
-    """Test TV connection and initiate pairing if needed"""
+    """Pair with Samsung TV"""
     config = load_config()
+
     try:
-        # Create connection with token file to trigger pairing process
+        logger.info(f"Pairing with TV at {config['tv_ip']}")
+
+        # Create connection that will trigger pairing popup on TV
         tv = SamsungTVWS(
-            host=config['tv_ip'], 
-            port=8002, 
-            token_file=str(TOKEN_FILE)
+            host=config['tv_ip'],
+            port=8002,
+            name="The Frame Art Manager"
         )
-        
-        # Test basic connection by getting device info
-        info = tv.rest_device_info()
-        logger.info(f"Connected to: {info}")
-        
-        # Try to get art info to test full API access
-        art = tv.art()
-        available = art.available()
-        available_count = len(available)
-        
-        # Check if token was created
-        token_exists = TOKEN_FILE.exists()
-        
-        return jsonify({
-            'success': True,
-            'message': f'Successfully connected to {info.get("name", "Samsung TV")}',
-            'device_info': info,
-            'art_count': available_count,
-            'token_created': token_exists,
-            'token_file': str(TOKEN_FILE)
-        })
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"TV pairing/connection error: {e}")
-        
-        # Check if this looks like a pairing issue
-        if "Connection refused" in error_msg:
-            return jsonify({
-                'error': 'Connection refused',
-                'instructions': [
-                    '1. Make sure your Samsung TV is ON (not standby)',
-                    '2. TV must be connected to the same network',
-                    '3. TV must support SmartThings API (2016+ models)',
-                    '4. Try again - a popup should appear on TV asking to allow connection'
-                ],
-                'token_exists': TOKEN_FILE.exists()
-            })
-        elif "timeout" in error_msg.lower():
-            return jsonify({
-                'error': 'Connection timeout',
-                'instructions': [
-                    '1. Check if TV IP address is correct',
-                    '2. Ensure TV and computer are on same network',
-                    '3. Check if TV firewall is blocking port 8002'
-                ],
-                'token_exists': TOKEN_FILE.exists()
-            })
-        else:
-            return jsonify({
-                'error': f'Connection error: {error_msg}',
-                'instructions': [
-                    '1. Check TV settings and ensure SmartThings/API access is enabled',
-                    '2. Try turning TV off and on',
-                    '3. Check network connectivity'
-                ],
-                'token_exists': TOKEN_FILE.exists()
-            })
 
-@app.route('/force-pair')
-def force_pair():
-    """Force pairing process with TV to create token"""
-    config = load_config()
-    
-    # Remove existing token if it exists
-    if TOKEN_FILE.exists():
-        TOKEN_FILE.unlink()
-        logger.info("Removed existing token file")
-    
-    try:
-        logger.info(f"Attempting to force pair with TV at {config['tv_ip']}")
-        
-        # Try different connection approaches for token creation
-        from samsungtvws import SamsungTVWS
-        
-        # Method 1: Try with name parameter for pairing
-        logger.info("Method 1: Connection with name for pairing...")
-        tv = SamsungTVWS(
-            host=config['tv_ip'], 
-            port=8002, 
-            token_file=str(TOKEN_FILE),
-            name="Frame Art Manager"  # Add name for pairing
-        )
-        
-        # Force operations that should require token
-        logger.info("Getting device info...")
-        info = tv.rest_device_info()
-        
-        logger.info("Accessing art API...")
-        art = tv.art()
-        
-        logger.info("Getting available art...")
-        available = art.available()
-        
-        logger.info("Getting current art...")
-        current = art.get_current()
-        
-        # Try a more aggressive operation - upload a tiny test image
-        logger.info("Testing upload capability with tiny image...")
-        test_pixel = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\tpHYs\x00\x00\x0b\x13\x00\x00\x0b\x13\x01\x00\x9a\x9c\x18\x00\x00\x00\nIDAT\x08\x1dc\xf8\x00\x00\x00\x01\x00\x01\x02\x9aX\xc6\x00\x00\x00\x00IEND\xaeB`\x82'
-        try:
-            art.upload(test_pixel, file_type='png')
-            logger.info("Test upload successful")
-        except Exception as upload_e:
-            logger.warning(f"Test upload failed: {upload_e}")
-        
-        # Check if token was created
-        token_exists = TOKEN_FILE.exists()
-        logger.info(f"Token file exists after operations: {token_exists}")
-        
-        token_content = ""
-        if token_exists:
-            with open(TOKEN_FILE, 'r') as f:
-                token_content = f.read().strip()
-                logger.info(f"Token created: {token_content}")
-        else:
-            # Try to manually create a connection session
-            logger.info("Attempting manual token creation...")
-            try:
-                # Force a WebSocket connection
-                tv.open()
-                logger.info("WebSocket connection opened")
-                tv.close()
-                logger.info("WebSocket connection closed")
-            except Exception as ws_e:
-                logger.warning(f"WebSocket connection failed: {ws_e}")
-        
-        final_token_exists = TOKEN_FILE.exists()
-        
-        return jsonify({
-            'success': True,
-            'message': 'TV operations completed',
-            'device_name': info.get('name', 'Unknown'),
-            'token_created': final_token_exists,
-            'token_file_path': str(TOKEN_FILE),
-            'token_content': token_content[:50] + '...' if token_content else 'None',
-            'available_art_count': len(available),
-            'current_art': current
-        })
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Force pairing error: {e}")
-        
-        return jsonify({
-            'error': error_msg,
-            'token_exists': TOKEN_FILE.exists(),
-            'instructions': [
-                'WATCH YOUR TV SCREEN FOR A POPUP!',
-                'The TV should show a dialog asking to allow connection',
-                'Use your TV remote to select "Allow" or "Yes"',
-                'If no popup appears, try turning TV off/on and retry'
-            ]
-        })
-
-@app.route('/debug-upload/<filename>')
-def debug_upload(filename):
-    """Debug image upload to TV with detailed logging"""
-    config = load_config()
-    
-    try:
-        # Create connection
-        tv = SamsungTVWS(
-            host=config['tv_ip'], 
-            port=8002, 
-            token_file=str(TOKEN_FILE)
-        )
-        
-        image_path = IMAGES_DIR / filename
-        if not image_path.exists():
-            return jsonify({'error': f'Image not found: {filename}'})
-
-        with open(image_path, 'rb') as f:
-            image_data = f.read()
-
-        file_ext = filename.rsplit('.', 1)[1].lower()
-        file_type = 'png' if file_ext == 'png' else 'jpg'
-        
-        # Test basic connection
+        # Force a connection that requires authentication
         device_info = tv.rest_device_info()
-        
-        # Get art API
-        art_api = tv.art()
-        
-        # Get current art info
-        current_art = art_api.get_current()
-        available_art = art_api.available()
-        
-        # Attempt upload
-        upload_result = art_api.upload(image_data, file_type=file_type)
-        
-        return jsonify({
-            'success': True,
-            'filename': filename,
-            'file_size': len(image_data),
-            'file_type': file_type,
-            'device_name': device_info.get('name', 'Unknown'),
-            'current_art_count': len(available_art),
-            'upload_result': upload_result,
-            'current_art': current_art
-        })
-        
+        logger.info(f"Connected to: {device_info.get('name', 'Samsung TV')}")
+
+        # Try to access art API to trigger token creation
+        art = tv.art()
+        available = art.available()
+
+        # Get the token from the connection
+        token = getattr(tv, 'token', None)
+        if token:
+            config['tv_token'] = token
+            save_config(config)
+            logger.info(f"Token saved: {token}")
+
+            return jsonify({
+                'success': True,
+                'message': f'Successfully paired with {device_info.get("name", "Samsung TV")}',
+                'art_count': len(available)
+            })
+        else:
+            return jsonify({
+                'error': 'Pairing failed - no token received. Make sure you accepted the popup on your TV screen.'
+            })
+
     except Exception as e:
+        logger.error(f"Pairing error: {e}")
         return jsonify({
             'error': str(e),
-            'filename': filename,
-            'tv_ip': config['tv_ip']
+            'instructions': [
+                '1. Make sure your Samsung TV is ON and in Art Mode',
+                '2. Watch your TV screen for a popup asking to allow connection',
+                '3. Use your TV remote to select "Allow" or "Yes"',
+                '4. If no popup appears, try turning TV off and on again'
+            ]
         })
 
 if __name__ == '__main__':

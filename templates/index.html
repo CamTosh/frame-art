@@ -22,6 +22,11 @@
         .flash.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .send-btn { background: #28a745; }
         .send-btn:hover { background: #218838; }
+        .pair-btn { background: #ffc107; color: black; }
+        .pair-btn:hover { background: #e0a800; }
+        .paired-status { background: #d1ecf1; color: #0c5460; padding: 15px; border: 1px solid #bee5eb; margin-bottom: 20px; }
+        .setup-instructions { background: #fff3cd; color: #856404; padding: 15px; border: 1px solid #ffeaa7; margin-bottom: 20px; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
@@ -33,24 +38,45 @@
             {% if messages %}
                 <div class="flash-messages">
                     {% for message in messages %}
-                        <div class="flash success">{{ message }}</div>
+                        <div class="flash">{{ message }}</div>
                     {% endfor %}
                 </div>
             {% endif %}
         {% endwith %}
+        
+        {% if not tv_paired %}
+        <!-- Setup Instructions -->
+        <div class="setup-instructions">
+            <h3>📺 Samsung TV Setup Required</h3>
+            <p><strong>Before pairing:</strong></p>
+            <ol>
+                <li>Turn ON your Samsung Frame TV</li>
+                <li>Make sure TV is connected to the same WiFi network</li>
+                <li>Put the TV in <strong>Art Mode</strong> (press Art button on remote)</li>
+                <li>Enter your TV's IP address below and click "Pair TV"</li>
+                <li>Watch your TV screen and <strong>ACCEPT</strong> the connection popup</li>
+            </ol>
+        </div>
         
         <!-- TV Configuration -->
         <div class="section">
             <h2>TV Configuration</h2>
             <form method="POST" action="/config" class="config-form">
                 <label for="tv_ip">Samsung TV IP Address:</label>
-                <input type="text" name="tv_ip" id="tv_ip" value="{{ tv_ip }}" placeholder="192.168.1.106" required>
+                <input type="text" name="tv_ip" id="tv_ip" value="{{ tv_ip }}" placeholder="192.168.1.22" required>
                 <button type="submit">Update IP</button>
-                <button type="button" onclick="pairTV()">Test Connection</button>
-                <button type="button" onclick="forcePair()" style="background: #ffc107; color: black;">Force Pair TV</button>
+                <button type="button" onclick="pairTV()" class="pair-btn">Pair TV</button>
             </form>
             <div id="pair-status"></div>
         </div>
+        {% else %}
+        <!-- Paired Status -->
+        <div class="paired-status">
+            <h3>✅ TV Paired Successfully!</h3>
+            <p>Connected to Samsung TV at {{ tv_ip }}</p>
+            <p>You can now upload images and send them to your Frame TV.</p>
+        </div>
+        {% endif %}
         
         <!-- Upload Section -->
         <div class="section">
@@ -75,9 +101,13 @@
                             <img src="/image/{{ image.filename }}" alt="{{ image.filename }}">
                             <h4>{{ image.filename }}</h4>
                             <p>Size: {{ "%.1f"|format(image.size / 1024) }} KB</p>
-                            <a href="/send-to-tv/{{ image.filename }}">
-                                <button class="send-btn">Send to TV</button>
-                            </a>
+                            {% if tv_paired %}
+                                <a href="/send-to-tv/{{ image.filename }}">
+                                    <button class="send-btn">Send to TV</button>
+                                </a>
+                            {% else %}
+                                <button class="send-btn" disabled>Pair TV First</button>
+                            {% endif %}
                         </div>
                     {% endfor %}
                 </div>
@@ -85,19 +115,12 @@
                 <p>No images found. Upload some images to get started!</p>
             {% endif %}
         </div>
-        
-        <!-- TV Status -->
-        <div class="section">
-            <h2>TV Status</h2>
-            <button onclick="checkTVStatus()">Check TV Status</button>
-            <div id="tv-status"></div>
-        </div>
     </div>
     
     <script>
         function pairTV() {
             const statusDiv = document.getElementById('pair-status');
-            statusDiv.innerHTML = '<p>Testing connection and initiating pairing...</p>';
+            statusDiv.innerHTML = '<p><strong>🔄 Pairing with TV...</strong><br>WATCH YOUR TV SCREEN FOR A POPUP!</p>';
             
             fetch('/pair-tv')
                 .then(response => response.json())
@@ -105,54 +128,13 @@
                     if (data.success) {
                         statusDiv.innerHTML = `
                             <div style="color: green; padding: 10px; background: #d4edda; border: 1px solid #c3e6cb; margin-top: 10px;">
-                                <strong>✓ ${data.message}</strong><br>
+                                <strong>✅ ${data.message}</strong><br>
                                 <small>Available art count: ${data.art_count}</small><br>
-                                <small>Token created: ${data.token_created ? 'Yes' : 'No'}</small>
+                                <small>Reloading page...</small>
                             </div>
                         `;
-                    } else {
-                        let instructions = '';
-                        if (data.instructions) {
-                            instructions = '<br><br><strong>Instructions:</strong><br>' + data.instructions.join('<br>');
-                        }
-                        
-                        statusDiv.innerHTML = `
-                            <div style="color: #721c24; padding: 10px; background: #f8d7da; border: 1px solid #f5c6cb; margin-top: 10px;">
-                                <strong>✗ ${data.error}</strong><br>
-                                <small>Token file exists: ${data.token_exists ? 'Yes' : 'No'}</small>
-                                ${instructions}
-                                <br><br>
-                                <strong>⚠️ IMPORTANT:</strong> Watch your TV screen for a popup asking to allow the connection!
-                            </div>
-                        `;
-                    }
-                })
-                .catch(error => {
-                    statusDiv.innerHTML = `
-                        <div style="color: #721c24; padding: 10px; background: #f8d7da; border: 1px solid #f5c6cb; margin-top: 10px;">
-                            <strong>✗ Connection Error</strong><br>
-                            <small>${error}</small>
-                        </div>
-                    `;
-                });
-        }
-        
-        function forcePair() {
-            const statusDiv = document.getElementById('pair-status');
-            statusDiv.innerHTML = '<p><strong>🔄 FORCING TV PAIRING...</strong><br>WATCH YOUR TV SCREEN FOR A POPUP!</p>';
-            
-            fetch('/force-pair')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        statusDiv.innerHTML = `
-                            <div style="color: green; padding: 10px; background: #d4edda; border: 1px solid #c3e6cb; margin-top: 10px;">
-                                <strong>✅ TV PAIRING SUCCESSFUL!</strong><br>
-                                Device: ${data.device_name}<br>
-                                Token created: ${data.token_created ? 'Yes' : 'No'}<br>
-                                <small>You can now upload images to the TV!</small>
-                            </div>
-                        `;
+                        // Reload page after successful pairing
+                        setTimeout(() => location.reload(), 2000);
                     } else {
                         let instructions = '';
                         if (data.instructions) {
@@ -161,13 +143,9 @@
                         
                         statusDiv.innerHTML = `
                             <div style="color: #856404; padding: 10px; background: #fff3cd; border: 1px solid #ffeaa7; margin-top: 10px;">
-                                <strong>⚠️ PAIRING IN PROGRESS</strong><br>
-                                <small>Error: ${data.error}</small><br>
-                                <small>Token exists: ${data.token_exists ? 'Yes' : 'No'}</small>
+                                <strong>⚠️ Pairing Failed</strong><br>
+                                <small>Error: ${data.error}</small>
                                 ${instructions}
-                                <br><br>
-                                <strong>🎯 LOOK AT YOUR TV NOW!</strong><br>
-                                <strong>Accept the connection popup on your Samsung TV!</strong>
                             </div>
                         `;
                     }
@@ -175,29 +153,10 @@
                 .catch(error => {
                     statusDiv.innerHTML = `
                         <div style="color: #721c24; padding: 10px; background: #f8d7da; border: 1px solid #f5c6cb; margin-top: 10px;">
-                            <strong>❌ Pairing Failed</strong><br>
+                            <strong>❌ Connection Error</strong><br>
                             <small>${error}</small>
                         </div>
                     `;
-                });
-        }
-        
-        function checkTVStatus() {
-            fetch('/tv-art')
-                .then(response => response.json())
-                .then(data => {
-                    const statusDiv = document.getElementById('tv-status');
-                    if (data.error) {
-                        statusDiv.innerHTML = `<p style="color: red;">Error: ${data.error}</p>`;
-                    } else {
-                        statusDiv.innerHTML = `
-                            <p>Available art on TV: ${data.available_count}</p>
-                            <p>Current art ID: ${data.current.content_id || 'Unknown'}</p>
-                        `;
-                    }
-                })
-                .catch(error => {
-                    document.getElementById('tv-status').innerHTML = `<p style="color: red;">Error: ${error}</p>`;
                 });
         }
     </script>

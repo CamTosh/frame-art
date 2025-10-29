@@ -21,7 +21,7 @@ COPY templates/ templates/
 RUN mkdir -p images
 
 # Expose port
-EXPOSE 5000
+EXPOSE 5600
 
 # Run the application
 CMD ["python", "app.py"]
