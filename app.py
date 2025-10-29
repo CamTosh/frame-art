@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os
+import time
 import json
 from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file, flash
@@ -23,7 +23,6 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 IMAGES_DIR.mkdir(exist_ok=True)
 
 def load_config():
-    """Load configuration from file"""
     default_config = {'tv_ip': '192.168.1.22', 'tv_token': None}
     if CONFIG_FILE.exists():
         try:
@@ -34,7 +33,6 @@ def load_config():
     return default_config
 
 def save_config(config):
-    """Save configuration to file"""
     try:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
@@ -47,24 +45,24 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def is_tv_paired():
-    """Check if TV is already paired (has token)"""
     config = load_config()
     return config.get('tv_token') is not None
 
 def get_tv_connection():
-    """Get Samsung TV connection with token"""
     config = load_config()
     try:
         if config.get('tv_token'):
             return SamsungTVWS(
                 host=config['tv_ip'],
                 port=8002,
-                token=config['tv_token']
+                token=config['tv_token'],
+                name='Frame Art Manager'
             )
         else:
             return SamsungTVWS(
                 host=config['tv_ip'],
-                port=8002
+                port=8002,
+                name='Frame Art Manager'
             )
     except Exception as e:
         logger.error(f"Error connecting to TV: {e}")
@@ -72,7 +70,6 @@ def get_tv_connection():
 
 @app.route('/')
 def index():
-    """Main page with image gallery and upload form"""
     config = load_config()
     paired = is_tv_paired()
 
@@ -94,7 +91,6 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
-    """Handle file upload"""
     if 'files[]' not in request.files:
         flash('No files selected')
         return redirect(url_for('index'))
@@ -115,12 +111,10 @@ def upload_files():
 
 @app.route('/image/<filename>')
 def serve_image(filename):
-    """Serve local images"""
     return send_file(IMAGES_DIR / filename)
 
 @app.route('/send-to-tv/<filename>')
 def send_to_tv(filename):
-    """Send image to Samsung TV"""
     if not is_tv_paired():
         flash('❌ TV not paired. Please pair your TV first.')
         return redirect(url_for('index'))
@@ -143,29 +137,38 @@ def send_to_tv(filename):
 
         logger.info(f"Image size: {len(image_data)} bytes, type: {file_type}")
 
-        # Create TV connection with token
-        tv = SamsungTVWS(
-            host=config['tv_ip'],
-            port=8002,
-            token=config['tv_token']
-        )
+        # Check image size - Samsung TVs have limits
+        max_size = 20 * 1024 * 1024  # 20MB limit
+        if len(image_data) > max_size:
+            flash(f'❌ Image too large: {len(image_data)/1024/1024:.1f}MB (max 20MB)')
+            return redirect(url_for('index'))
 
-        # Upload to TV
-        art_api = tv.art()
-        result = art_api.upload(image_data, file_type=file_type)
+        tv = get_tv_connection()
+
+        file_type_upper = file_type.upper()  # Samsung expects uppercase
+        result = tv.art().upload(image_data, file_type=file_type_upper, matte="none")
+        logger.info(f"Upload result: {result}")
 
         flash(f'✅ Successfully sent {filename} to Samsung Frame TV')
         logger.info(f"Successfully sent {filename} to TV")
 
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error sending {filename} to TV: {e}")
-        flash(f'❌ Failed to send {filename}: {str(e)}')
+
+        if "Broken pipe" in error_msg:
+            flash(f'❌ Upload failed: Connection lost during transfer. Try a smaller image or check TV network.')
+        elif "Connection refused" in error_msg:
+            flash(f'❌ Upload failed: TV refused connection. Try pairing again.')
+        elif "timeout" in error_msg.lower():
+            flash(f'❌ Upload failed: Connection timeout. Check network.')
+        else:
+            flash(f'❌ Failed to send {filename}: {error_msg}')
 
     return redirect(url_for('index'))
 
 @app.route('/config', methods=['POST'])
 def update_config():
-    """Update TV IP configuration"""
     tv_ip = request.form.get('tv_ip', '').strip()
     if tv_ip:
         config = load_config()
@@ -181,28 +184,36 @@ def update_config():
 
 @app.route('/pair-tv')
 def pair_tv():
-    """Pair with Samsung TV"""
     config = load_config()
 
     try:
         logger.info(f"Pairing with TV at {config['tv_ip']}")
+        tv = get_tv_connection()
 
-        # Create connection that will trigger pairing popup on TV
-        tv = SamsungTVWS(
-            host=config['tv_ip'],
-            port=8002,
-            name="The Frame Art Manager"
-        )
-
-        # Force a connection that requires authentication
         device_info = tv.rest_device_info()
         logger.info(f"Connected to: {device_info.get('name', 'Samsung TV')}")
 
-        # Try to access art API to trigger token creation
+        # Try multiple approaches to trigger popup
+        logger.info("Method 1: Opening WebSocket connection...")
+        tv.open()
+        time.sleep(3)
+
+        # Try sending a remote key to trigger authentication
+        try:
+            logger.info("Method 2: Sending test remote key...")
+            tv.send_key('KEY_POWER')  # This should definitely trigger auth
+            time.sleep(1)
+        except Exception as key_e:
+            logger.info(f"Remote key failed (expected): {key_e}")
+
+        # Try to access art API
+        logger.info("Method 3: Accessing art API...")
         art = tv.art()
         available = art.available()
 
-        # Get the token from the connection
+        tv.close()
+
+        # Check for token
         token = getattr(tv, 'token', None)
         if token:
             config['tv_token'] = token
@@ -216,7 +227,14 @@ def pair_tv():
             })
         else:
             return jsonify({
-                'error': 'Pairing failed - no token received. Make sure you accepted the popup on your TV screen.'
+                'error': 'No popup appeared or was dismissed. Try these steps:',
+                'instructions': [
+                    '1. POWER OFF your Samsung TV completely (unplug for 30 seconds)',
+                    '2. Power it back ON and wait for full boot',
+                    '3. Put TV in Art Mode (press Art button on remote)',
+                    '4. Make sure no other apps are connected to the TV',
+                    '5. Try pairing again - popup should appear immediately'
+                ]
             })
 
     except Exception as e:
@@ -224,10 +242,11 @@ def pair_tv():
         return jsonify({
             'error': str(e),
             'instructions': [
-                '1. Make sure your Samsung TV is ON and in Art Mode',
-                '2. Watch your TV screen for a popup asking to allow connection',
-                '3. Use your TV remote to select "Allow" or "Yes"',
-                '4. If no popup appears, try turning TV off and on again'
+                '1. TV might have cached old connection data',
+                '2. Go to TV Settings → General → External Device Manager → Device Connect Manager',
+                '3. Look for any "Frame Art Manager" entries and DELETE them',
+                '4. Restart TV completely (unplug/plug)',
+                '5. Try pairing again'
             ]
         })
 
